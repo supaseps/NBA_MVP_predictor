@@ -1,0 +1,197 @@
+---
+title: "Project"
+format: html
+editor: visual
+jupyter: python3
+---
+
+## 
+
+```{r}
+library(chromote)
+library(rvest)
+library(dplyr)
+
+data <- "https://www.tsn.ca/nba/article/nba-season-preview-rankings-predictions-and-more-for-every-team-n1-46617842/" %>% 
+  read_html()%>% 
+  html_elements(".b-article-body__h2")
+
+nba_projections <-dplyr::tibble (NBA_Team=rep(NA,30),
+                                 Projection=1:30)
+for (i in 1:30){
+  nba_projections$NBA_Team[i] <- sub("^[0-9]+\\.\\s*", "",html_text(data[[i]]))
+}
+
+
+
+b <- ChromoteSession$new()
+b$Page$navigate("https://www.espn.com/nba/bpi/_/view/projections")
+Sys.sleep(2)
+
+current_seeds <- b$Runtime$evaluate("document.documentElement.outerHTML")$result$value %>% 
+  read_html() %>% 
+  html_elements(".Table__TBODY") %>%
+  lapply(html_table) %>% 
+  as.data.frame() %>% 
+  rename(EndOfSeasonWins=X7, NBA_Team=X1)
+
+b$close()
+
+nba_projections<-merge(nba_projections,current_seeds,by ="NBA_Team", all= TRUE) 
+nba_projections <- nba_projections %>% 
+  mutate(delta= Projection-EndOfSeasonWins) %>% 
+  select(NBA_Team, delta,EndOfSeasonWins, Projection) %>% 
+  arrange((EndOfSeasonWins))
+
+```
+
+```{r}
+library(jsonlite)
+library(janitor)
+library (purrr)
+library(here)
+
+system(paste0('node "', here("web_scrape.js"), '"'))
+
+mvp_data <- fromJSON(here("mvp_data.json")) %>% 
+  as_tibble()
+
+mvp_data <- mvp_data %>% 
+  select(SeasonYear,player, points_won , pts_per_g, ast_per_g,trb_per_g, stl_per_g, blk_per_g, fg_pct)
+
+
+a <- ChromoteSession$new()
+a$Page$navigate("https://dunksandthrees.com/epm/actual")
+Sys.sleep(4)
+
+html <- a$Runtime$evaluate("document.documentElement.outerHTML")$result$value %>%
+  read_html() %>% 
+  html_table(fill= TRUE)
+
+a$close()
+
+epm_index <- which(sapply(html, function(t) any(grepl("EPM", t))))
+
+EPMtable <- html[[epm_index]]%>%
+  as_tibble(.name_repair=make_clean_names) %>% 
+  slice(-1) %>%
+  slice(1:20) %>% 
+  row_to_names(row_number=1)%>%
+  mutate(across(everything(), ~ str_remove(.x, "\\s\\d+$"))) %>% 
+  mutate(across(-c(Player, GP), as.numeric)) %>% 
+  drop_na()
+
+
+scale(EPMtable$EPM, center= TRUE, scale=TRUE)
+```
+
+```{r}
+library(ggplot2)
+library(plotly)
+
+
+
+pts <- mvp_data %>%
+  mutate(Pts=pts_per_g) %>% 
+  ggplot(aes(x=Pts,
+             y=points_won, 
+             text=paste0(player,": ", points_won)))+
+  geom_point(alpha=0.7, size= 2)
+
+
+pts_ast <- mvp_data %>%
+  mutate(Pts_ast=pts_per_g+ast_per_g) %>% 
+  ggplot(aes(x=Pts_ast,
+             y=points_won, 
+             text=paste0(player,": ", points_won)))+
+  geom_point(alpha=0.7, size= 2)
+
+pts_ast_rb<- mvp_data %>%
+  mutate(Pts_Rb_ast=pts_per_g+ast_per_g+trb_per_g) %>% 
+  ggplot(aes(x=Pts_Rb_ast,
+             y=points_won, 
+             text=paste0(player,": ", points_won)))+
+  geom_point(alpha=0.7, size= 2)
+
+
+subplot(
+  ggplotly(pts, tooltip = "text"),
+  ggplotly(pts_ast, tooltip = "text"),
+  ggplotly(pts_ast_rb, tooltip = "text"), margin=0.1)
+ 
+```
+
+```{r}
+ g <- mvp_data %>%
+  mutate(Pts_Rb_ast=pts_per_g+ast_per_g+trb_per_g) %>% 
+  ggplot(aes(x=Pts_Rb_ast,
+             y=points_won, 
+             text=paste0(player," ",SeasonYear,": ", points_won)))+
+  geom_point(alpha=0.7, size= 2)
+ 
+ ggplotly(g, tooltip="text")
+```
+
+```{r}
+d <- mvp_data %>%
+  mutate(Pts=pts_per_g) %>% 
+  ggplot(aes(x=Pts,
+             y=points_won, 
+             text=paste0(player,SeasonYear,": ", points_won)))+
+  geom_point(alpha=0.7, size= 2)
+
+ggplotly(d, tooltip="text")
+```
+
+```{r}
+library (rlang)
+library (glue)
+library(purrr)
+RegAuto <- function(x){
+  
+  dependent <- names(x)[3]
+  independent <- names(x)[4:6]
+  out <- tibble(model="init")
+  for (i in 1:length(independent)){
+    betas <- paste(independent[1:i], collapse = " + ")
+    out[i,1] <- glue::glue("{dependent}~{betas}")
+  }
+  out <- out %>% 
+    mutate(
+      output= purrr::map(model,~stats::lm(as.formula(.x), data= x)),
+      res=purrr::map(output,broom::glance)
+    ) %>% 
+    unnest(res) %>% 
+    select(1:4,p.value) %>%
+    mutate_if(is.numeric, round,3)
+  return (out)
+}
+
+RegAuto(x=mvp_data)
+
+```
+
+```{r}
+mvp_data <- mvp_data %>% 
+  mutate(
+    PRA=pts_per_g+trb_per_g+ast_per_g
+  )
+
+fit1 <- lm(mvp_data$points_won~mvp_data$PRA+I(mvp_data$PRA)^2)
+fit2 <- lm(mvp_data$points_won~mvp_data$PRA)
+fit1 %>% 
+  broom::glance()
+
+mvp_data %>% 
+ggplot(aes(x=PRA, y= points_won))+
+  geom_point()+
+  geom_smooth(
+    method="lm",
+    formula=y~poly(x,2,raw=TRUE),
+    se=FALSE,
+    color="orange",
+    linewidth=1
+  )
+
+
+```
