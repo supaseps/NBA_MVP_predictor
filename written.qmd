@@ -221,7 +221,7 @@ graph2 <- mvp_data %>%
   geom_point(aes(y = fg_pct * 100), color = "red") +
   labs(y = "Value",
        x= " players sorted by PRA",
-       title = "PRA vs FG% (2010)") +
+       title = "PRA vs FG%") +
   theme(axis.text.x = element_text(angle = 75, hjust = 1))
 
 ggplotly(graph2, tooltip= "text")
@@ -232,13 +232,13 @@ In 2018, Russell Westbrook averaged 25 points, 10 rebounds, and 10 assists with 
 
 ### Team Impact
 
-Basketball Refernce offers a valuable metric called Win Share that measures the amount of wins contributed by a player. This metric is then combined with two advanced stats:
+Basketball Reference offers a valuable metric called Win Share that measures the amount of wins contributed by a player. This metric is then combined with two advanced stats:
 
-1.   Estimated Plus Minus (EPM):
+1.  **Estimated Plus Minus (EPM)**
 
     Is a metric that estimates how much a player helps or hurts their team per 100 possessions,
 
-2.  Defensive Estimated Plus Minus (D-EPM):
+2.  **Defensive Estimated Plus Minus (D-EPM):**
 
     Defensive EPM is the *defensive half* of the Estimated Plus‑Minus metric. Where overall EPM measures total impact, D‑EPM isolates how much a player helps their team on defense per 100 possessions.
 
@@ -250,7 +250,7 @@ mvp_data %>%
   summary
 ```
 
-As mentioned before, historically NBA analysts award the MVP to the best player on the team with most wins. Therefore, due to the tradition of this award, we adjust the weight of the PRA and win share paramater and turn the regression into a polynomial of power 3.
+Because MVP voters historically favors elite players on top‑winning teams, the model increases the influence of PRA and Win Shares and fits them with a third‑degree polynomial to capture the nonlinear way voters reward production and team success.
 
 ```{r}
 mvp_data %>% 
@@ -258,9 +258,56 @@ mvp_data %>%
   summary
 ```
 
+```{r}
+library (rsample)
+library(recipes)
+set.seed(20)
+split <- mvp_data %>% 
+  rsample::initial_split(prop=0.7 )
+
+df_train <- rsample::training(split)
+df_test <- rsample::testing(split)
+piped <- recipes::recipe (vote_share~., data=df_train) %>% 
+  recipes::step_rm(stl_per_g,blk_per_g) %>% 
+  recipes::prep()
+
+train_baked <- recipes::bake(piped, df_train)
+test_baked  <- recipes::bake(piped, df_test)
+
+```
+
+```{r}
+model_lm <- 
+  parsnip::linear_reg(mode= "regression") %>% 
+  parsnip::set_engine("lm") %>% 
+  parsnip::fit (vote_share~ . , data = train_baked)
+out <- model_lm %>% 
+  stats::predict(new_data= test_baked) %>% 
+  dplyr::bind_cols(Value = test_baked %>%
+                     dplyr::ungroup() %>% 
+                     dplyr::select (vote_share))
+out
+  
+
+  
+```
+
+```{r}
+library(yardstick)
+parsnip::tidy(model_lm)
+parsnip::glance(model_lm)
+model_lm %>% 
+  stats::predict(new_data= test_baked) %>% 
+  bind_cols (Value= test_baked %>% 
+               ungroup() %>% 
+               select(vote_share)) %>% 
+  metrics(truth=vote_share, estimate= .pred) %>% 
+  arrange(.metric)
+```
+
 # Unexpected Wins
 
-The TSN article paints a picture of the expectations going into the season. Oklahoma, Denver, Cleveland and the knicks were projected to be the top 4 seeds. However, currently with one more week to go, Detroit, Boston and San Antonio are emerging as unexpected playoff contenders that have racked up more wins than expected.
+The TSN article paints a picture of the expectations going into the season. Oklahoma, Denver, Cleveland and the Knicks were projected to be the top 4 seeds. However, currently with one more week to go, Detroit, Boston and San Antonio are emerging as unexpected playoff contenders that have racked up more wins than expected.
 
 | Here `Current_seed` is the anticipated final seed for each team today and `Projected_seed` is the anticipated seed predicted in October 2025.
 
@@ -290,4 +337,51 @@ nba_projections %>%
   )
   
 
+```
+
+# Player Comparison
+
+```{r}
+
+library(fmsb)
+
+data <- mvp_data %>%
+  slice(1:2) %>% 
+  select (pts_per_g, trb_per_g, ast_per_g, fg_pct,ws, EPM) 
+ 
+
+data <- rbind(rep(30,6) , rep(0,6) , data)
+
+radarchart(data)
+
+
+```
+
+```{r}
+library(dplyr)
+library(plotly)
+
+data <- mvp_data %>%
+  slice(1:2) %>%
+  select(player, pts_per_g, trb_per_g, ast_per_g, fg_pct, ws, EPM)
+
+plot_ly(
+  type = "scatterpolar",
+  fill = "toself"
+) %>%
+  add_trace(
+    r = as.numeric(data[1, -1]),
+    theta = colnames(data)[-1],
+    name = data$player[1]
+  ) %>%
+  add_trace(
+    r = as.numeric(data[2, -1]),
+    theta = colnames(data)[-1],
+    name = data$player[2]
+  ) %>%
+  layout(
+    polar = list(
+      radialaxis = list(visible = TRUE, range = c(0, 30))
+    )
+  )
 ```
