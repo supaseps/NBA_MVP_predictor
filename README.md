@@ -1,4 +1,4 @@
-# Here, I will disclose all the outside sources that I have usded for this research
+# Here, I will disclose all the outside sources that I have used for this research
 
 ## setting a row as column names of a data set
 https://stackoverflow.com/questions/32054368/use-first-row-data-as-column-names-in-r
