@@ -1,0 +1,293 @@
+---
+title: "The NBA MVP Race: Eye-test or a tale of advanced stats?"
+author: Seps Sepahvand
+format: 
+  html:
+    toc: true
+    toc-location: right
+    toc-title: "Table of Contents"
+    fontsize: 0.9em
+    embed-resources: true
+editor: source
+echo: false
+---
+
+# Introduction
+
+For the past 3 years, it seems like the the title of the best player in the league, cemented by receiving the *Most Valuable Player* (MVP) award, has felt unusually unsettled with no unanimous winner emerging. This is due to players such as [Luka Doncic]{.underline}, [Nikola Jokic]{.underline}, [Shai Gilgeous-Alexander]{.underline} and [Victor Wembanyama]{.underline} all having recording breaking seasons.
+
+In the past, this award was given to the best player on the best team. However, recently it is a feat of "consistent individual excellence combined with team leadership" that will grant a player that title. But how can we measure these qualities? Fran Blinebury, an NBA MVP voter says "I know it when I see it". Scott Howard-Cooper, another voter, states that its a mixture of statistics, personal eye test and personal judgement.[^1]
+
+[^1]: <https://www.nba.com/news/blogtable-what-criteria-matters-most-making-mvp-decision>
+
+The explosion of advanced analytics has changed the way fans and analysts understand the game, offering deeper insight into a player’s value than ever before. Which leads to this important question:
+
+|  Can these advanced metrics reveal patterns in how NBA MVP votes are awarded?
+
+## Methodology
+
+The value of each player is estimated from multiple aspects:
+
+1.  The success of the team and the impact of the candidate star player on final box score
+2.  Personal points, rebounds an assist numbers mixed with advanced stats such as Estimated Plus Minus (EPM), Field Goal percentage, etc.
+    -   These numbers are then used to create a regression that will estimate the MVP votes awarded to each player while considering the impact of each parameter.
+3.  And at last, I look at the case for each individual player.
+
+### web scraping
+
+The information that is needed for this study is very much scattered. Therefore, four separate websites were used to gather information on all aspects of the game:
+
+1.  A TSN article: was published in October of last year ranking every team:
+
+    This article illustrates the expectations of analysts at the start of the season. Subsequently, it could be used to identify teams that have exceeded expectations.
+
+2.  ESPN current power ranking: This website contains the projected seeds given a teams current record. We will need this data set since the NBA season is not over yet.
+
+3.  NBA Awards Voting: Basketball Reference is a website that contains all NBA MVP votes for each player from the year 1955 to 2025.
+
+4.  DUNKS&THREES: This website calculates advanced stats such as EPM and Field Goal % for all NBA players.
+
+# Data Cleansing
+
+-   After Web scraping the TSN and the ESPN projection website, they are merged together so that we have beginning of the season and end of the season projection in the same `tibble`. Additionally, a new column `Unexpected_Wins` will be added that is the difference between expected wins at the beginning of the season and expected wins with the season coming to an end. This metric tells us which teams have exceeded expectations.
+
+```{r warning = F, include=FALSE, message = F}
+library(chromote)
+library(rvest)
+library(dplyr)
+library(gt)
+library(tidyverse)
+
+data <- "https://www.tsn.ca/nba/article/nba-season-preview-rankings-predictions-and-more-for-every-team-n1-46617842/" %>% 
+  rvest::read_html()%>% 
+  rvest::html_elements(".b-article-body__h2")
+
+nba_projections <-dplyr::tibble (NBA_Team=rep(NA,30),
+                                 Projected_seed=1:30)
+for (i in 1:30){
+  nba_projections$NBA_Team[i] <- sub("^[0-9]+\\.\\s*", "",html_text(data[[i]]))
+}
+
+
+
+b <- ChromoteSession$new()
+b$Page$navigate("https://www.espn.com/nba/bpi/_/view/projections")
+Sys.sleep(2)
+
+current_seeds <- b$Runtime$evaluate("document.documentElement.outerHTML")$result$value %>% 
+  rvest::read_html() %>% 
+  rvest::html_elements(".Table__TBODY") %>%
+  lapply(html_table) %>% 
+  as.data.frame() %>% 
+  rename(Current_seed=X7, NBA_Team=X1)
+b$close()
+
+nba_projections<-merge(nba_projections,current_seeds,by ="NBA_Team", all= TRUE) %>%
+  mutate(Unexpected_Wins= Projected_seed-Current_seed) %>% 
+  select(NBA_Team,Current_seed, Projected_seed,Unexpected_Wins ) %>% 
+  arrange((Current_seed))
+```
+
+-   For the Advanced stats the information from DUNKS&THREES and MVP votes from Basketball Reference are pulled into separate tables and later merged together using player name and season.
+
+```{r warning = F, include = F,  message = F}
+library(jsonlite)
+library(janitor)
+library (purrr)
+library(here)
+
+system(paste0('node "', here("web_scrape.js"), '"'))
+
+mvp_data <- fromJSON(here("mvp_data.json")) %>% 
+  as_tibble()
+
+mvp_data <- mvp_data %>% 
+  select(SeasonYear,player, points_won , pts_per_g, ast_per_g,trb_per_g, stl_per_g, blk_per_g, fg_pct,ws) %>% 
+  filter(points_won>3)
+
+system(paste0('node "', here("EPM_data.js"), '"'))
+
+epm_data <- fromJSON(here("epm_data.json"))%>%
+  as_tibble() %>% 
+  mutate(across(-c(Player, GP), as.numeric)) %>% 
+  drop_na()%>% 
+  select(Season,Player,OFF,DEF,EPM)
+
+mvp_data <- mvp_data %>% 
+  left_join(epm_data %>% 
+              select(Season,Player,OFF,DEF, EPM), by= c("SeasonYear"="Season", "player"="Player")) %>% 
+  drop_na()
+```
+
+# Regression Model
+
+## Dependent Variable
+
+In this regression model, our dependent variable needs to reflect how many MVP votes a player received. While we could use the raw vote totals scraped from Basketball Reference, this approach is misleading because the number of available votes varies widely from season to season. For example, Stephen Curry earned 1,310 votes as a unanimous MVP in 2016, while Nikola Jokić won in 2022 with only 65 votes due to a much closer race.
+
+To make voting outcomes comparable across seasons, we use the **share of MVP votes received** rather than the raw totals. This standardizes the dependent variable and allows us to analyze patterns in MVP voting more reliably.
+
+```{r warning = F, include = F, message = F}
+mvp_data <- mvp_data %>% 
+  group_by(SeasonYear) %>% 
+  mutate(vote_share= points_won/sum(points_won)) %>% 
+  ungroup()
+```
+
+## Independent Variables
+
+### PRA: Points Rebounds Assists
+
+The most visible impact of a player is their points, assists and rebounds. We first plug these parameters one at a time and see the impact of the inclusions of each parameter on our linear regression:
+
+```{r message=FALSE, warning=FALSE}
+library (rlang)
+library (glue)
+library(purrr)
+RegAuto <- function(x){
+  
+  dependent <- names(x)[14]
+  independent <- names(x)[4:6]
+  out <- tibble(model="init")
+  for (i in 1:length(independent)){
+    betas <- paste(independent[1:i], collapse = " + ")
+    out[i,1] <- glue::glue("{dependent}~{betas}")
+  }
+  out <- out %>% 
+    mutate(
+      output= purrr::map(model,~stats::lm(as.formula(.x), data= x)),
+      res=purrr::map(output,broom::glance)
+    ) %>% 
+    unnest(res) %>% 
+    select(1:4,p.value) %>%
+    mutate_if(is.numeric, round,3)
+  return (out)
+}
+
+RegAuto(x=mvp_data)
+```
+
+As we add more variables to the regression model, the R‑squared consistently increases, suggesting that these metrics help explain a player’s MVP vote share. Because points, rebounds, and assists often tell a more complete story when viewed together, analysts frequently combine them into a single metric: **PRA (Points + Rebounds + Assists)** which captures a player’s overall box‑score impact.[^2]
+
+[^2]: <https://theballzone.com/whats-pra-in-nba/>
+
+```{r message=FALSE, warning=FALSE}
+mvp_data <- mvp_data %>% 
+  mutate(
+    PRA=pts_per_g+trb_per_g+ast_per_g
+  ) %>% 
+  filter(points_won>3)
+```
+
+The importance of **PRA** becomes clear when examining the relationship between MVP votes and PRA from 2010 to 2025. Between 2010 and 2014, the player who led the league in PRA also finished with the **highest MVP vote share**, and players with elite PRA totals consistently landed in the top three of MVP voting. This demonstrates the importance of this metric and therefore, higher weight will be placed on this parameter in the regression.
+
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+library(plotly)
+graph1<-mvp_data %>% 
+  ggplot(aes(x = PRA, y = vote_share,
+             color= SeasonYear,
+             text=paste0(player,": ",PRA,", ", round(vote_share,digits=2))))+
+    geom_point(color="#1D8565",alpha=0.8) +
+    labs(
+      x = "PRA",
+      y = "vote share") +
+    theme(panel.background = 
+            element_rect(
+              fill = "grey",
+              color = "#64D2AA", 
+              linewidth = 2),
+          axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+          legend.position = "none"
+          )+
+    facet_wrap(~ SeasonYear)
+
+ggplotly(graph1, tooltip="text")
+```
+
+### Field Goal Percentage
+
+When interpreting PRA, it’s important to remember that raw volume can be misleading. A player can inflate their PRA by taking a high number of shots, and jeopardize their team's efficiency. That’s why PRA should be evaluated alongside a player’s field‑goal percentage.
+
+| High PRA paired with poor shooting often signals empty volume, while high PRA with strong efficiency reflects real offensive impact
+
+Looking at the graph below, we can see that players like Dwyane Wade, John Wall, and Giannis may have similar PRA totals, but their efficiency (FG%) varies a lot. This shows that PRA alone is not a perfect parameter . For that reason, the regression model pairs PRA with field‑goal percentage to account for both volume and efficiency.
+
+```{r message=FALSE, warning=FALSE}
+graph2 <- mvp_data %>%
+  distinct(player, .keep_all = TRUE) %>%
+  ggplot(aes(x = reorder(player,-PRA), text =paste0(SeasonYear,"\nPRA : ",PRA,"\nFG%: ", fg_pct*100,"%"))) +
+  geom_col(aes(y = PRA), fill = "#1D8565") +
+  geom_point(aes(y = fg_pct * 100), color = "red") +
+  labs(y = "Value",
+       x= " players sorted by PRA",
+       title = "PRA vs FG% (2010)") +
+  theme(axis.text.x = element_text(angle = 75, hjust = 1))
+
+ggplotly(graph2, tooltip= "text")
+```
+
+There are also a few clear anomaly cases.\
+In 2018, Russell Westbrook averaged 25 points, 10 rebounds, and 10 assists with respectable FG%, giving him the highest PRA among MVP candidates. Yet he still finished outside the top three in MVP voting. This shows that voters expect big scoring, rebounding, and assist numbers to **translate into wins**. High PRA and FG% helps, but without a strong team record, it isn’t enough to stay in the top tier of MVP consideration.
+
+### Team Impact
+
+Basketball Refernce offers a valuable metric called Win Share that measures the amount of wins contributed by a player. This metric is then combined with two advanced stats:
+
+1.   Estimated Plus Minus (EPM):
+
+    Is a metric that estimates how much a player helps or hurts their team per 100 possessions,
+
+2.  Defensive Estimated Plus Minus (D-EPM):
+
+    Defensive EPM is the *defensive half* of the Estimated Plus‑Minus metric. Where overall EPM measures total impact, D‑EPM isolates how much a player helps their team on defense per 100 possessions.
+
+As regression parameters, Win Shares capture a player’s contribution to team wins, EPM measures overall impact on point differential per possession, and D‑EPM isolates how many fewer points a team allows with that player on the floor.
+
+```{r}
+mvp_data %>%
+  stats::lm(vote_share~PRA+fg_pct+DEF+EPM+ws, data=.) %>% 
+  summary
+```
+
+As mentioned before, historically NBA analysts award the MVP to the best player on the team with most wins. Therefore, due to the tradition of this award, we adjust the weight of the PRA and win share paramater and turn the regression into a polynomial of power 3.
+
+```{r}
+mvp_data %>% 
+  lm(vote_share~I(PRA^3)+fg_pct + DEF + EPM+I(ws^3), data=.) %>% 
+  summary
+```
+
+# Unexpected Wins
+
+The TSN article paints a picture of the expectations going into the season. Oklahoma, Denver, Cleveland and the knicks were projected to be the top 4 seeds. However, currently with one more week to go, Detroit, Boston and San Antonio are emerging as unexpected playoff contenders that have racked up more wins than expected.
+
+| Here `Current_seed` is the anticipated final seed for each team today and `Projected_seed` is the anticipated seed predicted in October 2025.
+
+```{r message=FALSE, warning=FALSE}
+gt_chart<- nba_projections %>% 
+  gt::gt() %>% 
+  gt::opt_interactive(use_pagination = TRUE , use_search=TRUE,page_size_default = 5
+  )
+
+gt_chart
+```
+
+This table shows us that out of the top teams in the league, San Antonio have had the most unanticipated success. Here San Antonio stands out as a contender for the second seed with more unexpected wins than any other team. The graph below puts their unexpected success into perspective.
+
+```{r message=FALSE, warning=FALSE}
+library(ggplot2)
+nba_projections %>%
+  arrange(Current_seed) %>%
+  slice(1:10) %>%
+  ggplot2::ggplot(aes(y=NBA_Team, x=Unexpected_Wins))+
+  geom_col(fill="#1D8565")+
+  labs(title="Current best teams and their extra wins",
+       y="Top 10 teams",
+       x= "unexpected wins")+
+  theme(plot.title = element_text(size = 14, face = "bold.italic"),panel.background = element_rect(
+    fill="grey",color = "grey", linewidth = 2)
+  )
+  
+
+```
